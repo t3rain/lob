@@ -155,7 +155,6 @@ bool OrderBook::add_market(OrderId id, OrderType type, Quantity qty, std::vector
     return true;
 }
 
-
 bool OrderBook::cancel(OrderId id){
 
     if(finder_.find(id) == finder_.end())    return false;

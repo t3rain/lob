@@ -3,6 +3,9 @@
 #include <vector>
 #include <algorithm>
 #include <iostream>
+#include <map>
+#include <algorithm>
+#include <optional>
 
 struct RefOrder{ 
     OrderId id; 
@@ -11,6 +14,7 @@ struct RefOrder{
     Price price; 
     uint64_t seq; 
 };
+
 
 class ReferenceBook {
 
@@ -163,6 +167,13 @@ public:
         return q;
     }
 
+    std::vector<OrderId> live_ids() const{
+        std::vector<OrderId> ids;
+        for(const auto& o: bids_)   ids.push_back(o.id);
+        for(const auto& o: asks_)   ids.push_back(o.id);
+        return ids;
+    }
+
     std::optional<size_t> best_bid() const{
         auto it = std::min_element(bids_.begin(), bids_.end(), compare_bids);
         if(it == bids_.end())   return std::nullopt;
@@ -184,6 +195,24 @@ public:
         auto idx = best_ask();
         if (!idx) return std::nullopt;
         return asks_[*idx].price;
+    }
+
+    size_t live_count() const { return bids_.size() + asks_.size(); }
+
+    size_t longest_queue() const {
+        std::map<Price, size_t> bid_count, ask_count;
+        for (const auto& o : bids_) ++bid_count[o.price];
+        for (const auto& o : asks_) ++ask_count[o.price];
+        size_t best = 0;
+        for (const auto& [p, n] : bid_count) best = std::max(best, n);
+        for (const auto& [p, n] : ask_count) best = std::max(best, n);
+        return best;
+    }
+
+    std::optional<Quantity> qty_of(OrderId id) const {
+        for (const auto& o : bids_) if (o.id == id) return o.qty;
+        for (const auto& o : asks_) if (o.id == id) return o.qty;
+        return std::nullopt;
     }
 };
 
