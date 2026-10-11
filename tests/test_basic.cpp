@@ -1,4 +1,4 @@
-// "test/test_basic.cpp"
+// "tests/test_basic.cpp"
 
 #include <cassert>
 #include <iostream>

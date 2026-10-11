@@ -19,19 +19,16 @@ enum class OrderType {
 };
 
 inline const char* to_str(OrderType type){
-
     switch(type){
         case OrderType::BUY  : return "BUY";
         case OrderType::SELL : return "SELL";
     }
     return "?";
-
 }
 
 inline std::ostream& operator<<(std::ostream& os, OrderType type){
     return os << to_str(type);
 }
-
 
 struct Order {
     OrderId id;
