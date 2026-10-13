@@ -2,7 +2,7 @@
 
 #include <cassert>
 #include <iostream>
-#include "../inc/order_book.h"
+#include "order_book.h"
 
 const auto BUY = OrderType::BUY;
 const auto SELL = OrderType::SELL;

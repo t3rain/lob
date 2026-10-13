@@ -18,6 +18,13 @@ enum class OrderType {
     SELL
 };
 
+enum op_id {
+    LIMIT,
+    MARKET,
+    CANCEL,
+    MODIFY
+};
+
 inline const char* to_str(OrderType type){
     switch(type){
         case OrderType::BUY  : return "BUY";

@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 #include <set>
-#include "../inc/order_book.h"
+#include "order_book.h"
 #include "reference_book.h"
 
 const auto BUY = OrderType::BUY;
@@ -147,7 +147,7 @@ int main(int argc, char** argv){
             else        st.limit_cnt_f++;
         }
 
-        else if(choose >= 45 && choose < 55){
+        else if(choose < 55){
 
             // cancel
             std::vector<OrderId> live_ids = ref.live_ids();
@@ -171,7 +171,7 @@ int main(int argc, char** argv){
             else        st.cancel_cnt_f++;
         }
 
-        else if(choose >= 55 && choose < 90){
+        else if(choose < 90){
 
             // modify 
             std::vector<OrderId> live_ids = ref.live_ids();
