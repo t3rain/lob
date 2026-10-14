@@ -10,7 +10,7 @@ switch ($Mode) {
     "check"   { $flags = $common + @("-g", "-O1", "-D_GLIBCXX_DEBUG", "-D_GLIBCXX_ASSERTIONS") }
     "release" { $flags = $common + @("-O2", "-DNDEBUG") }
 }
-$suffix = @{ debug = "_dbg"; check = "_checkk"; release = "_rel" }[$Mode]
+$suffix = @{ debug = "_dbg"; check = "_chk"; release = "_rel" }[$Mode]
 
 # name of the executable -> the file that contains its main()
 # EDIT THESE to match your real file names
