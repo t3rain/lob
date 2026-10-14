@@ -121,7 +121,7 @@ void print_stats(Throughput& th, Latency& lt){
     std::sort(lt.limit_latencies_all.begin(), lt.limit_latencies_all.end());
     std::sort(lt.market_latencies_all.begin(), lt.market_latencies_all.end());
     std::sort(lt.cancel_latencies_all.begin(), lt.cancel_latencies_all.end());
-    std::sort(lt.modify_latencies_all.begin(), modify_latencies_all.end());
+    std::sort(lt.modify_latencies_all.begin(), lt.modify_latencies_all.end());
     
     std::cout << "Overall latencies:\n" 
         << "limit latencies: p50 " << percentile(lt.limit_latencies_all, 0.5) << " p90 " << percentile(lt.limit_latencies_all, 0.9) 
