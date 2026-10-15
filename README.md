@@ -132,7 +132,13 @@ Each row is one change on top of the previous one. The unit tests, invariants an
 | 3 | [Flat array by price tick] | [ ] | [ ] | [ ] |
 
 Reserve: reserve space upfront for the finder map (8 MB). 
-Measured by alternating the two configurations in one binary; every pair favoured the reserve. This was tested by moving the reserve out of the timed check and inside. In both cases, the reserve-up-front strategy shows ~1.12x gain, proving that this optimizes steady-state rehash cost rather than just startup work.
+Measured by alternating the two configurations (no reserve vs. 1M buckets) in a single binary, six interleaved
+pairs; every pair favoured the reserve (ratio 1.10x to 1.20x, median-of-medians 12.86 to 14.45 M ops/s, about 1.12x).
+The result is the same when book construction, including the 8 MB bucket-array allocation, is moved inside the
+timed region, so the gain is not just startup work moved out of the timer. It is consistent with removing
+rehash cost during table growth; the mechanism was not isolated further. Both seeds' checksums are unchanged.
+A first sweep that ran the sizes sequentially did not show the effect, which is why paired comparisons are used
+for all later steps.
 
 
 ## What did not work
