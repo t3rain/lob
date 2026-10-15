@@ -66,6 +66,9 @@ class OrderBook {
 
 public:
 
+    explicit OrderBook(size_t expected_order = 0) {
+        finder_.reserve(expected_order);
+    }
     /*
     Adds the order to the specified side
     Returns: FALSE, if the orderId is a duplicate or qty is 0

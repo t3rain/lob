@@ -114,8 +114,8 @@ One untimed warm-up run, then 20 timed runs of the full workload on a fresh book
 
 | Step | Seed | Median (M ops/s) | Median (ns/op) | Min | Max | Spread | Checksum |
 |---|---|---|---|---|---|---|---|
-| Baseline | 1 | 12.61 | 79.3 | 11.90 | 13.11 | 9.7% | `0x6e8fea1d99d5a2d0` |
-| Baseline | 4 | 12.61 | 79.3 | 11.65 | 12.99 | 10.6% | `0x5350e91cf56a6367` |
+| Baseline | 4 | 13.22 | 75.63 | 11.92 | 13.70 | 13.5% | `0x5350e91cf56a6367` |
+| Baseline | 5 | 13.67 | 73.14 | 12.78 | 13.96 | 8.6% | `0x329ecc77e01ae5e0` |
 
 The checksum is an order-dependent hash of every trade plus the final book state.
 It must be identical after every optimisation; a change means behaviour changed.
@@ -127,10 +127,18 @@ Each row is one change on top of the previous one. The unit tests, invariants an
 
 | Step | What changed | Median (M ops/s) | vs. baseline | Checksums match |
 |---|---|---|---|---|
-| 0 | Baseline | 12.61 | 1.00x | yes |
-| 1 | `finder_.reserve(...)` | [ ] | [ ] | [ ] |
+| 1 | `finder_.reserve(1<<20)` | 12.26 -> 14.45 | 1.12x (range 1.10x to 1.20x over 6 interleaved pairs) | yes |
 | 2 | [Pooled node allocation] | [ ] | [ ] | [ ] |
 | 3 | [Flat array by price tick] | [ ] | [ ] | [ ] |
+
+Reserve: reserve space upfront for the finder map (8 MB). 
+Measured by alternating the two configurations in one binary; every pair favoured the reserve. This was tested by moving the reserve out of the timed check and inside. In both cases, the reserve-up-front strategy shows ~1.12x gain, proving that this optimizes steady-state rehash cost rather than just startup work.
+
+
+## What did not work
+Compiler flags: Adding `-O3` and `-flto` flags have no measurable effect.
+
+
 
 ### Latency
 

@@ -140,9 +140,9 @@ struct RunResult {
     uint64_t cancel_ok = 0, cancel_tot = 0, modify_ok = 0, modify_tot = 0, n_trades = 0;
 };
 
-static RunResult run_throughput(const std::vector<Op>& ops, const WorkloadInfo& info) {
+static RunResult run_throughput(const std::vector<Op>& ops, const WorkloadInfo& info, size_t reserve) {
 
-    OrderBook b;
+    
     std::vector<Trade> tr;
     tr.reserve(64);
 
@@ -150,7 +150,7 @@ static RunResult run_throughput(const std::vector<Op>& ops, const WorkloadInfo& 
     uint64_t cs = 0;
 
     auto t0 = clk::now();
-
+    OrderBook b(reserve);
     for (const Op& o : ops) {
         tr.clear();
         switch (o.kind) {
@@ -200,9 +200,9 @@ struct LatencySamples {
     std::vector<uint64_t> limit, market, cancel, modify;
 };
 
-static LatencySamples run_latency(const std::vector<Op>& ops) {
+static LatencySamples run_latency(const std::vector<Op>& ops, size_t reserve) {
 
-    OrderBook b;
+    OrderBook b(reserve);
     std::vector<Trade> tr;
     tr.reserve(64);
 
@@ -289,6 +289,7 @@ int main(int argc, char** argv) {
     if (argc >= 2) seed = std::stoull(argv[1]);
     if (argc >= 3) n    = std::stoull(argv[2]);
     if (argc >= 4) reps = std::stoi(argv[3]);
+    size_t reserve_n = (argc >= 5) ? std::stoull(argv[4]) : (1u << 20);
 
     measure_clock();
 
@@ -302,13 +303,13 @@ int main(int argc, char** argv) {
               << "   price range drawn: " << info.min_price << ".." << info.max_price << "\n\n";
 
     // throughput
-    run_throughput(ops, info);                              // warm-up
+    run_throughput(ops, info, reserve_n);                              // warm-up
 
     std::vector<double> ops_per_sec;
     std::vector<uint64_t> checksums;
     RunResult last;
     for (int rep = 0; rep < reps; ++rep) {
-        RunResult r = run_throughput(ops, info);
+        RunResult r = run_throughput(ops, info, reserve_n);
         ops_per_sec.push_back(n / r.seconds);
         checksums.push_back(r.checksum);
         last = r;
@@ -335,8 +336,8 @@ int main(int argc, char** argv) {
               << "   trades " << last.n_trades << "\n\n";
 
     //  latency
-    run_latency(ops);                                       // warm-up, discarded
-    LatencySamples ls = run_latency(ops);
+    run_latency(ops, reserve_n);                                       // warm-up, discarded
+    LatencySamples ls = run_latency(ops, reserve_n);
     std::cout << "LATENCY (one pass, sampled; nanoseconds)\n";
     print_latency_row("limit",  ls.limit);
     print_latency_row("market", ls.market);
