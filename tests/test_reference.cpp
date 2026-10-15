@@ -41,7 +41,6 @@ void run_suite(const char* name) {
         r.add_order(2, OrderType::BUY, 10, 100, t);
         r.add_order(3, OrderType::BUY, 10, 100, t);
         r.add_order(4, OrderType::BUY, 10, 99,  t);
-        std::cout<<r.longest_queue()<<"\n";
         assert(r.longest_queue() == 3);
     }
     // R1: empty book

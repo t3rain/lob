@@ -60,13 +60,14 @@ struct Locator{
     OrderType type;
     Price price;
     std::list<Order>::iterator it;
+    Level* lvl;     // pointer to the level
 };
 
 class OrderBook {
 
 public:
 
-    explicit OrderBook(size_t expected_order = 0) {
+    explicit OrderBook(size_t expected_order = 1<<20) {
         finder_.reserve(expected_order);
     }
     /*

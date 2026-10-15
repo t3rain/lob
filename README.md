@@ -128,10 +128,10 @@ Each row is one change on top of the previous one. The unit tests, invariants an
 | Step | What changed | Median (M ops/s) | vs. baseline | Checksums match |
 |---|---|---|---|---|
 | 1 | `finder_.reserve(1<<20)` | 12.26 -> 14.45 | 1.12x (range 1.10x to 1.20x over 6 interleaved pairs) | yes |
-| 2 | [Pooled node allocation] | [ ] | [ ] | [ ] |
+| 2 | Pointer to `level` in the locator map | 14.60 → 16.91 | 1.16x | yes |
 | 3 | [Flat array by price tick] | [ ] | [ ] | [ ] |
 
-Reserve: reserve space upfront for the finder map (8 MB). 
+#### __Reserve__: reserve space upfront for the finder map (8 MB). 
 Measured by alternating the two configurations (no reserve vs. 1M buckets) in a single binary, six interleaved
 pairs; every pair favoured the reserve (ratio 1.10x to 1.20x, median-of-medians 12.86 to 14.45 M ops/s, about 1.12x).
 The result is the same when book construction, including the 8 MB bucket-array allocation, is moved inside the
@@ -139,6 +139,20 @@ timed region, so the gain is not just startup work moved out of the timer. It is
 rehash cost during table growth; the mechanism was not isolated further. Both seeds' checksums are unchanged.
 A first sweep that ran the sizes sequentially did not show the effect, which is why paired comparisons are used
 for all later steps.
+
+#### __Stashing level pointer__: store the pointer to the level in the locator map for O(1) instead of O(logL) lookup.
+Cancel and modify previously located an order's price level by searching the `bids_` / `asks_` map. Each
+`Locator` now also stores a pointer to its `Level`, which stays valid because `std::map` nodes do not move;
+an emptied level is erased by price as the last step of the removal. `check_invariants()` was extended to
+verify that every locator's level pointer equals the address of the level that actually contains the order.
+Measured on two seeds (20 runs each, base and new binaries run back to back, not interleaved): median
+throughput rose from 13.50 to 16.02 M ops/s (1.19x) on seed 1 and from 14.60 to 16.91 M ops/s (1.16x) on
+seed 4. The slowest new run was at least as fast as the fastest base run on both seeds (by a narrow margin
+on seed 1), and run-to-run spread was 7-16%, so the ratios are approximate. Checksums are unchanged on both seeds.
+Sampled mean latency fell by about 24 ns for both cancel and modify (seed 1: 91 to 68 and 80 to 56 ns; seed 4:
+90 to 66 and 78 to 55 ns), consistent with removing the map search from exactly those two operations. Limit and
+market, whose code did not change, moved by 6-9 ns, which is within the noise of a single sampled pass.
+Latency means include about 25 ns of clock overhead.
 
 
 ## What did not work
@@ -164,9 +178,9 @@ All values in nanoseconds (seed 4). The raw mean includes about 25 ns of clock o
 ### Where the time goes
 
 Sampled mean per operation (clock overhead subtracted) times the number of operations, approximate:
-limit adds about 56% of runtime, cancels about 32%, modifies about 7%, market orders about 5%.
-Limit adds and cancels dominate even though both are O(1) or O(log L) on paper, which points at memory
-behaviour (heap allocation and cache misses) and not instruction count. [Update after the allocator experiment.]
+limit adds about 60% of runtime, cancels about 30%, modifies about 5%, market orders about 5%.
+Limit adds are clearly dominant, even with `O(log L)` complexity, which points at memory
+behaviour (heap allocation and cache misses) and not instruction count.
 
 ## Limitations and future work
 
