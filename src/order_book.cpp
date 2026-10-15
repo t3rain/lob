@@ -201,54 +201,6 @@ bool OrderBook::modify(OrderId id, Quantity new_qty){
     return true;
 }
 
-void OrderBook::display_level(const Level& lvl) const{
-
-    auto ord_it = lvl.orders.begin();
-    while(ord_it != lvl.orders.end()){
-        Order ord = *ord_it;
-        std::cout<<"[ OrderID: "<<ord.id<<", Quantity: "<<ord.qty<<"] ->";
-        ord_it++;
-    }
-    std::cout<<"\n";
-    return;
-}
-
-void OrderBook::display_book() const{
-
-    std::cout<<"Bids:\n";
-    {
-        auto it = bids_.begin();
-        while(it != bids_.end()){
-            std::cout<<it->first<<": ";
-            display_level(it->second);
-            it++;
-        }
-        std::cout<<"\n";
-    }
-
-    {
-        std::cout<<"Asks:\n";
-        auto it = asks_.begin();
-        while(it != asks_.end()){
-            std::cout<<it->first<<": ";
-            display_level(it->second);
-            it++;
-        }
-        std::cout<<"\n";
-    }
-    return;
-}
-
-void OrderBook::display_map() const{
-
-    auto it = finder_.begin();
-    while(it != finder_.end()){
-        std::cout<<"ID: "<<it->first<<", Type: "<<it->second.type<<", Price: "<<it->second.price<<"\n";
-        it++;
-    }
-    return;
-}
-
 std::optional<Price> OrderBook::best_bid() const{
 
     if(bids_.empty()) return std::nullopt;

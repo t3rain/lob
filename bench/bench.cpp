@@ -1,12 +1,36 @@
-#include <chrono>
-#include <random>
+// "bench/bench.cpp"
+//
+// Usage:  bench_rel.exe [seed] [n_ops] [reps]      (defaults: 1  5000000  10)
+// Build:  .\build.ps1 bench -Mode release          (-O2 -DNDEBUG; never benchmark a debug build)
+//
+// Two separate passes, each on a fresh OrderBook:
+//   1. THROUGHPUT pass: no per-operation timing. One warm-up run (not reported), then `reps` timed runs.
+//      Each run computes a checksum of every trade plus the final book. The checksum must be identical
+//      across runs, and identical after every optimisation. If it changes, behaviour changed.
+//   2. LATENCY pass: a sample of operations is timed individually (see the clock caveat printed at the top).
+
 #include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <cstdint>
+#include <iomanip>
 #include <iostream>
+#include <random>
+#include <string>
+#include <vector>
 #include "order_book.h"
+
+using clk = std::chrono::steady_clock;
 
 struct Op { uint8_t kind; OrderId id; OrderType side; Price price; Quantity qty; };
 
-std::vector<Op> make_workload(uint64_t seed, size_t n){
+struct WorkloadInfo {
+    uint64_t n_limit = 0, n_cancel = 0, n_modify = 0, n_market = 0;
+    size_t   final_live = 0;                 // ids the generator still believes are resting
+    Price    min_price = 0, max_price = 0;   // over limit orders
+};
+
+static std::vector<Op> make_workload(uint64_t seed, size_t n, WorkloadInfo& info) {
 
     std::vector<Op> workload;
     workload.reserve(n);
@@ -19,258 +43,305 @@ std::vector<Op> make_workload(uint64_t seed, size_t n){
     Price mid = 10'000;
     uint64_t next_id = 1;
     std::vector<uint64_t> live_ids;
+    bool first_price = true;
 
-    for(uint64_t i{0}; i<n; i++){
+    for (uint64_t i = 0; i < n; ++i) {
 
-        if(i%50 == 0)   mid += (rng() & 1) ? 1 : -1;
+        if (i % 50 == 0) mid += (rng() & 1) ? 1 : -1;
 
         int p = pct(rng);
         OrderType s = (rng() & 1) ? OrderType::BUY : OrderType::SELL;
 
-        if(p < 45 || live_ids.empty()) {
+        if (p < 45 || live_ids.empty()) {
             // limit
             Quantity q = qty_d(rng);
             int k = off_d(rng);
             Price pr = (s == OrderType::BUY) ? mid - k : mid + k;
             workload.push_back({LIMIT, next_id, s, pr, q});
-            live_ids.push_back(next_id++);       
+            live_ids.push_back(next_id++);
+            ++info.n_limit;
+            if (first_price) { info.min_price = info.max_price = pr; first_price = false; }
+            info.min_price = std::min(info.min_price, pr);
+            info.max_price = std::max(info.max_price, pr);
         }
-        else if (p < 85){
-            // cancel
+        else if (p < 85) {
+            // cancel: mostly recent orders, sometimes any
             size_t window = std::min(live_ids.size(), size_t{100});
-            size_t idx = (pct(rng) < 90) ? live_ids.size() - 1 - (rng() % window)   :   rng() % live_ids.size();
+            size_t idx = (pct(rng) < 90) ? live_ids.size() - 1 - (rng() % window)
+                                         : rng() % live_ids.size();
             uint64_t id = live_ids[idx];
             workload.push_back({CANCEL, id, s, 0, 0});
-            live_ids[idx] = live_ids.back();
+            live_ids[idx] = live_ids.back();     // swap-and-pop: O(1) removal
             live_ids.pop_back();
             next_id++;
+            ++info.n_cancel;
         }
-        else if (p < 95){
+        else if (p < 95) {
             // modify
             size_t window = std::min(live_ids.size(), size_t{100});
-            size_t idx = (pct(rng) < 90) ? live_ids.size() - 1 - (rng() % window)   :   rng() % live_ids.size();
+            size_t idx = (pct(rng) < 90) ? live_ids.size() - 1 - (rng() % window)
+                                         : rng() % live_ids.size();
             uint64_t id = live_ids[idx];
             workload.push_back({MODIFY, id, s, 0, qty_d(rng)});
             next_id++;
+            ++info.n_modify;
         }
         else {
             workload.push_back({MARKET, next_id++, s, 0, qty_d(rng)});
+            ++info.n_market;
         }
     }
+    info.final_live = live_ids.size();
     return workload;
 }
 
-// ensure the vector is passed in sorted
-uint64_t percentile(const std::vector<uint64_t>& timings, double p){
-    size_t idx = static_cast<size_t>(std::ceil(p * timings.size()) - 1);
-    return timings[idx];
+// ---------------------------------------------------------------- helpers
+static constexpr uint64_t FNV_PRIME = 1099511628211ULL;
+
+static inline void mix(uint64_t& h, uint64_t v) { h = h * FNV_PRIME + v; }   // order-dependent hash
+
+static double median(std::vector<double> v) {
+    std::sort(v.begin(), v.end());
+    size_t m = v.size() / 2;
+    return (v.size() % 2) ? v[m] : 0.5 * (v[m - 1] + v[m]);
 }
 
-struct Throughput {
-    std::vector<double> ops_per_sec;
-    std::vector<double> ns_per_op;
-};
-
-struct Latency {
-    std::vector<uint64_t> limit_latencies_all;
-    std::vector<uint64_t> market_latencies_all;
-    std::vector<uint64_t> cancel_latencies_all;
-    std::vector<uint64_t> modify_latencies_all;
-
-    std::vector<uint64_t> limit_latencies_p50;
-    std::vector<uint64_t> limit_latencies_p90;
-    std::vector<uint64_t> limit_latencies_p99;
-    std::vector<uint64_t> limit_latencies_p99_9;
-
-    std::vector<uint64_t> market_latencies_p50;
-    std::vector<uint64_t> market_latencies_p90;
-    std::vector<uint64_t> market_latencies_p99;
-    std::vector<uint64_t> market_latencies_p99_9;
-
-    std::vector<uint64_t> cancel_latencies_p50;
-    std::vector<uint64_t> cancel_latencies_p90;
-    std::vector<uint64_t> cancel_latencies_p99;
-    std::vector<uint64_t> cancel_latencies_p99_9;
-
-    std::vector<uint64_t> modify_latencies_p50;
-    std::vector<uint64_t> modify_latencies_p90;
-    std::vector<uint64_t> modify_latencies_p99;
-    std::vector<uint64_t> modify_latencies_p99_9;
-};
-
-void print_stats(Throughput& th, Latency& lt){
-
-    std::cout << "THROUGHPUT: \n"; 
-    for(size_t i{0}; i<20; i++){
-        std::cout << "Iteration " << i+1 << " " << th.ops_per_sec[i]/1e6 << " M ops/sec " << th.ns_per_op[i] << " ns/op\n"; 
-    }
-
-    std::cout << "\nLATENCY: \n";
-    for(size_t i{0}; i<20; i++){
-        std::cout << "Iteration " << i+1 << ":\n" 
-        << "limit latencies: p50 " << lt.limit_latencies_p50[i] << " p90 " << lt.limit_latencies_p90[i]
-        << " p99 " << lt.limit_latencies_p99[i] << " p99.9 " << lt.limit_latencies_p99_9[i] << "\n"
-        << "market latencies: p50 " << lt.market_latencies_p50[i] << " p90 " << lt.market_latencies_p90[i]
-        << " p99 " << lt.market_latencies_p99[i] << " p99.9 " << lt.market_latencies_p99_9[i] << "\n"
-        << "cancel latencies: p50 " << lt.cancel_latencies_p50[i] << " p90 " << lt.cancel_latencies_p90[i]
-        << " p99 " << lt.cancel_latencies_p99[i] << " p99.9 " << lt.cancel_latencies_p99_9[i] << "\n"
-        << "modify latencies: p50 " << lt.modify_latencies_p50[i] << " p90 " << lt.modify_latencies_p90[i]
-        << " p99 " << lt.modify_latencies_p99[i] << " p99.9 " << lt.modify_latencies_p99_9[i] << "\n";
-    }
-
-    std::sort(lt.limit_latencies_all.begin(), lt.limit_latencies_all.end());
-    std::sort(lt.market_latencies_all.begin(), lt.market_latencies_all.end());
-    std::sort(lt.cancel_latencies_all.begin(), lt.cancel_latencies_all.end());
-    std::sort(lt.modify_latencies_all.begin(), lt.modify_latencies_all.end());
-    
-    std::cout << "Overall latencies:\n" 
-        << "limit latencies: p50 " << percentile(lt.limit_latencies_all, 0.5) << " p90 " << percentile(lt.limit_latencies_all, 0.9) 
-        << " p99 " << percentile(lt.limit_latencies_all, 0.99)  << " p99.9 " << percentile(lt.limit_latencies_all, 0.999)  << "\n"
-        << "market latencies: p50 " << percentile(lt.market_latencies_all, 0.5) << " p90 " << percentile(lt.market_latencies_all, 0.9)
-        << " p99 " << percentile(lt.market_latencies_all, 0.99) << " p99.9 " << percentile(lt.market_latencies_all, 0.999) << "\n"
-        << "cancel latencies: p50 " << percentile(lt.cancel_latencies_all, 0.5) << " p90 " << percentile(lt.cancel_latencies_all, 0.9) 
-        << " p99 " << percentile(lt.cancel_latencies_all, 0.99) << " p99.9 " << percentile(lt.cancel_latencies_all, 0.999) << "\n"
-        << "modify latencies: p50 " << percentile(lt.modify_latencies_all, 0.5) << " p90 " << percentile(lt.modify_latencies_all, 0.9) 
-        << " p99 " << percentile(lt.modify_latencies_all, 0.99) << " p99.9 " << percentile(lt.modify_latencies_all, 0.999) << "\n";
-    std::cout << "\n";
-    return;
+// v must already be sorted
+static uint64_t percentile(const std::vector<uint64_t>& v, double p) {
+    if (v.empty()) return 0;
+    size_t rank = static_cast<size_t>(std::ceil(p * v.size()));
+    if (rank == 0) rank = 1;
+    return v[rank - 1];
 }
 
+static uint64_t ns_between(clk::time_point a, clk::time_point b) {
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(b - a).count());
+}
 
+// Smallest observed clock tick, and the average cost of one now() call.
+static void measure_clock() {
+    uint64_t tick = UINT64_MAX;
+    for (int i = 0; i < 20000; ++i) {
+        auto a = clk::now(), b = clk::now();
+        while (b == a) b = clk::now();                     // spin until the clock advances
+        tick = std::min(tick, ns_between(a, b));
+    }
+    const int N = 1'000'000;
+    uint64_t sum = 0;
+    for (int i = 0; i < N; ++i) { auto a = clk::now(); auto b = clk::now(); sum += ns_between(a, b); }
+    std::cout << "clock: smallest tick " << tick << " ns, average now()-to-now() " << double(sum) / N << " ns\n"
+              << "       latency values below about 2 ticks are not resolvable\n\n";
+}
 
+// ---------------------------------------------------------------- throughput pass
+struct RunResult {
+    double   seconds = 0;
+    uint64_t checksum = 0;
+    uint64_t cancel_ok = 0, cancel_tot = 0, modify_ok = 0, modify_tot = 0, n_trades = 0;
+};
+
+static RunResult run_throughput(const std::vector<Op>& ops, const WorkloadInfo& info) {
+
+    OrderBook b;
+    std::vector<Trade> tr;
+    tr.reserve(64);
+
+    RunResult r;
+    uint64_t cs = 0;
+
+    auto t0 = clk::now();
+
+    for (const Op& o : ops) {
+        tr.clear();
+        switch (o.kind) {
+            case LIMIT:
+                b.add_order(o.id, o.side, o.qty, o.price, tr);
+                break;
+            case MARKET:
+                b.add_market(o.id, o.side, o.qty, tr);
+                break;
+            case CANCEL:
+                ++r.cancel_tot;
+                r.cancel_ok += b.cancel(o.id) ? 1 : 0;
+                break;
+            case MODIFY:
+                ++r.modify_tot;
+                r.modify_ok += b.modify(o.id, o.qty) ? 1 : 0;
+                break;
+            default:
+                std::cout << "invalid op kind\n";
+                break;
+        }
+        for (const auto& t : tr) {
+            mix(cs, static_cast<uint64_t>(t.price));
+            mix(cs, static_cast<uint64_t>(t.qty));
+            mix(cs, static_cast<uint64_t>(t.resting));
+            mix(cs, static_cast<uint64_t>(t.incoming));
+        }
+        r.n_trades += tr.size();
+    }
+
+    auto t1 = clk::now();
+    r.seconds = std::chrono::duration<double>(t1 - t0).count();
+
+    // Final-state snapshot, folded into the checksum. Outside the timed region.
+    mix(cs, static_cast<uint64_t>(b.best_bid().value_or(0)));
+    mix(cs, static_cast<uint64_t>(b.best_ask().value_or(0)));
+    for (Price p = info.min_price - 2; p <= info.max_price + 2; ++p) {
+        mix(cs, static_cast<uint64_t>(b.depth_at(OrderType::BUY, p)));
+        mix(cs, static_cast<uint64_t>(b.depth_at(OrderType::SELL, p)));
+    }
+    r.checksum = cs;
+    return r;
+}
+
+// ---------------------------------------------------------------- latency pass
+struct LatencySamples {
+    std::vector<uint64_t> limit, market, cancel, modify;
+};
+
+static LatencySamples run_latency(const std::vector<Op>& ops) {
+
+    OrderBook b;
+    std::vector<Trade> tr;
+    tr.reserve(64);
+
+    LatencySamples ls;
+    ls.limit.reserve(ops.size() / 45 / 20 + 16);
+    ls.market.reserve(ops.size() / 5 / 20 + 16);
+    ls.cancel.reserve(ops.size() / 40 / 20 + 16);
+    ls.modify.reserve(ops.size() / 10 / 20 + 16);
+
+    uint64_t c_limit = 0, c_market = 0, c_cancel = 0, c_modify = 0;
+
+    // Each operation executes exactly once; only some of them are timed.
+    for (const Op& o : ops) {
+        tr.clear();
+        switch (o.kind) {
+            case LIMIT:
+                if (++c_limit % 45 == 0) {
+                    auto a = clk::now();
+                    b.add_order(o.id, o.side, o.qty, o.price, tr);
+                    auto z = clk::now();
+                    ls.limit.push_back(ns_between(a, z));
+                } else {
+                    b.add_order(o.id, o.side, o.qty, o.price, tr);
+                }
+                break;
+            case MARKET:
+                if (++c_market % 5 == 0) {
+                    auto a = clk::now();
+                    b.add_market(o.id, o.side, o.qty, tr);
+                    auto z = clk::now();
+                    ls.market.push_back(ns_between(a, z));
+                } else {
+                    b.add_market(o.id, o.side, o.qty, tr);
+                }
+                break;
+            case CANCEL:
+                if (++c_cancel % 40 == 0) {
+                    auto a = clk::now();
+                    b.cancel(o.id);
+                    auto z = clk::now();
+                    ls.cancel.push_back(ns_between(a, z));
+                } else {
+                    b.cancel(o.id);
+                }
+                break;
+            case MODIFY:
+                if (++c_modify % 10 == 0) {
+                    auto a = clk::now();
+                    b.modify(o.id, o.qty);
+                    auto z = clk::now();
+                    ls.modify.push_back(ns_between(a, z));
+                } else {
+                    b.modify(o.id, o.qty);
+                }
+                break;
+            default:
+                break;
+        }
+    }
+    return ls;
+}
+
+static void print_latency_row(const char* name, std::vector<uint64_t>& v) {
+    std::sort(v.begin(), v.end());
+    uint64_t sum = 0;
+    for(const auto& x: v)   sum += x;
+    double mean = v.empty() ? 0 : (double)sum/v.size();
+    std::cout << std::left << std::setw(8) << name << std::right
+              << " samples " << std::setw(8) << v.size()
+              << "  p50 " << std::setw(6) << percentile(v, 0.50)
+              << "  p90 " << std::setw(6) << percentile(v, 0.90)
+              << "  p99 " << std::setw(6) << percentile(v, 0.99)
+              << "  p99.9 " << std::setw(6) << percentile(v, 0.999)
+              << "  mean " << std::setw(8) << mean << "   (ns)\n";
+}
+
+// ---------------------------------------------------------------- main
 int main(int argc, char** argv) {
 
-    int seed = 1;
-    uint64_t n = 5'000'000;
+    uint64_t seed = 1;
+    size_t   n    = 5'000'000;
+    int      reps = 10;
 
-    if(argc >= 2)   seed = std::stoi(argv[1]);
-    if(argc >= 3)   n  = std::stoull(argv[2]);
+    if (argc >= 2) seed = std::stoull(argv[1]);
+    if (argc >= 3) n    = std::stoull(argv[2]);
+    if (argc >= 4) reps = std::stoi(argv[3]);
 
-    auto ops = make_workload(seed, n);
+    measure_clock();
 
-    Throughput th;
-    Latency lt;
-    
-    bool warmup = true;
-    for (int rep = 0; rep < 21; ++rep) {
+    WorkloadInfo info;
+    auto ops = make_workload(seed, n, info);
 
-        if(rep == 1)    warmup = false;
-        OrderBook b; std::vector<Trade> tr;
+    std::cout << "workload: seed " << seed << ", " << n << " ops\n"
+              << "  limit " << info.n_limit << "  cancel " << info.n_cancel
+              << "  modify " << info.n_modify << "  market " << info.n_market << "\n"
+              << "  generator live ids at end: " << info.final_live
+              << "   price range drawn: " << info.min_price << ".." << info.max_price << "\n\n";
 
-        uint64_t limits = 0;
-        uint64_t markets = 0;
-        uint64_t cancels = 0;
-        uint64_t modifys = 0;
+    // throughput
+    run_throughput(ops, info);                              // warm-up
 
-        std::vector<uint64_t> limit_latencies;
-        limit_latencies.reserve(50000);
-
-        std::vector<uint64_t> market_latencies;
-        market_latencies.reserve(50000);
-
-        std::vector<uint64_t> cancel_latencies;
-        cancel_latencies.reserve(50000);
-
-        std::vector<uint64_t> modify_latencies;
-        modify_latencies.reserve(50000);
-        
-        auto t0 = std::chrono::steady_clock::now();
-
-        for (const Op& o : ops) {
-            tr.clear();
-            if(o.kind == LIMIT){
-                if(++limits%45 == 0){
-                    auto start = std::chrono::steady_clock::now();
-                    b.add_order(o.id, o.side, o.qty, o.price, tr);
-                    auto end = std::chrono::steady_clock::now();
-                    limit_latencies.push_back(
-                        static_cast<std::chrono::nanoseconds>(end-start).count()
-                    );
-                }
-                b.add_order(o.id, o.side, o.qty, o.price, tr);
-            }
-            else if(o.kind == CANCEL){
-                if(++cancels%40 == 0){
-                    auto start = std::chrono::steady_clock::now();
-                    b.cancel(o.id);
-                    auto end = std::chrono::steady_clock::now();
-                    cancel_latencies.push_back(
-                        static_cast<std::chrono::nanoseconds>(end-start).count()
-                    );
-                }
-                b.cancel(o.id);
-            }
-            else if(o.kind == MODIFY){
-                if(++modifys%10 == 0){
-                    auto start = std::chrono::steady_clock::now();
-                    b.modify(o.id, o.qty);
-                    auto end = std::chrono::steady_clock::now();
-                    modify_latencies.push_back(
-                        static_cast<std::chrono::nanoseconds>(end-start).count()
-                    );
-                }
-                b.modify(o.id, o.qty);
-            }
-            else{
-                if(++markets%5 == 0){
-                    auto start = std::chrono::steady_clock::now();
-                    b.add_market(o.id, o.side, o.qty, tr);
-                    auto end = std::chrono::steady_clock::now();
-                    market_latencies.push_back(
-                        static_cast<std::chrono::nanoseconds>(end-start).count()
-                    );
-                }
-                b.add_market(o.id, o.side, o.qty, tr);
-            }
-            //for (const auto& t : tr) checksum += t.qty * 31 + t.resting;
-        }
-        auto t1 = std::chrono::steady_clock::now();
-        std::chrono::duration<double> elapsed = t1 - t0;
-        double seconds = elapsed.count();
-
-        if(!warmup){
-            double ops = n / seconds;
-            double nspop = seconds*1e9/n ;
-            th.ops_per_sec.push_back(ops);
-            th.ns_per_op.push_back(nspop);
-
-            std::sort(limit_latencies.begin(), limit_latencies.end());
-            std::sort(market_latencies.begin(), market_latencies.end());
-            std::sort(cancel_latencies.begin(), cancel_latencies.end());
-            std::sort(modify_latencies.begin(), modify_latencies.end());
-
-            lt.limit_latencies_p50.push_back(percentile(limit_latencies, 0.5));
-            lt.limit_latencies_p90.push_back(percentile(limit_latencies, 0.9));
-            lt.limit_latencies_p99.push_back(percentile(limit_latencies, 0.99));
-            lt.limit_latencies_p99_9.push_back(percentile(limit_latencies, 0.999));
-
-            lt.market_latencies_p50.push_back(percentile(market_latencies, 0.5));
-            lt.market_latencies_p90.push_back(percentile(market_latencies, 0.9));
-            lt.market_latencies_p99.push_back(percentile(market_latencies, 0.99));
-            lt.market_latencies_p99_9.push_back(percentile(market_latencies, 0.999));
-
-            lt.cancel_latencies_p50.push_back(percentile(cancel_latencies, 0.5));
-            lt.cancel_latencies_p90.push_back(percentile(cancel_latencies, 0.9));
-            lt.cancel_latencies_p99.push_back(percentile(cancel_latencies, 0.99));
-            lt.cancel_latencies_p99_9.push_back(percentile(cancel_latencies, 0.999));
-
-            lt.modify_latencies_p50.push_back(percentile(modify_latencies, 0.5));
-            lt.modify_latencies_p90.push_back(percentile(modify_latencies, 0.9));
-            lt.modify_latencies_p99.push_back(percentile(modify_latencies, 0.99));
-            lt.modify_latencies_p99_9.push_back(percentile(modify_latencies, 0.999));
-
-            lt.limit_latencies_all.insert(lt.limit_latencies_all.end(), limit_latencies.begin(), limit_latencies.end());
-            lt.market_latencies_all.insert(lt.market_latencies_all.end(), market_latencies.begin(), market_latencies.end());
-            lt.cancel_latencies_all.insert(lt.cancel_latencies_all.end(), cancel_latencies.begin(), cancel_latencies.end());
-            lt.modify_latencies_all.insert(lt.modify_latencies_all.end(), modify_latencies.begin(), modify_latencies.end());
-        }
-
-        // print: ops/sec, checksum, final best bid/ask
+    std::vector<double> ops_per_sec;
+    std::vector<uint64_t> checksums;
+    RunResult last;
+    for (int rep = 0; rep < reps; ++rep) {
+        RunResult r = run_throughput(ops, info);
+        ops_per_sec.push_back(n / r.seconds);
+        checksums.push_back(r.checksum);
+        last = r;
+        std::cout << "run " << std::setw(2) << rep + 1 << ": "
+                  << std::fixed << std::setprecision(2) << ops_per_sec.back() / 1e6 << " M ops/s, "
+                  << r.seconds * 1e9 / n << " ns/op\n";
     }
 
-    print_stats(th, lt);
-    // std::cout << "checksum " << checksum << "\n";
-    // std::cout << "Iteration " << rep << ": " << ops_per_sec / 1e6 << " M ops/s, " << ns_per_op << " ns/op\n";
+    bool same = std::all_of(checksums.begin(), checksums.end(),
+                            [&](uint64_t c) { return c == checksums.front(); });
+
+    double med = median(ops_per_sec);
+    double mn  = *std::min_element(ops_per_sec.begin(), ops_per_sec.end());
+    double mx  = *std::max_element(ops_per_sec.begin(), ops_per_sec.end());
+
+    std::cout << "\nTHROUGHPUT  median " << med / 1e6 << " M ops/s (" << 1e9 / med << " ns/op)"
+              << "   min " << mn / 1e6 << "   max " << mx / 1e6 << "   spread "
+              << std::setprecision(1) << 100.0 * (mx - mn) / med << "%\n";
+    std::cout << "checksum 0x" << std::hex << checksums.front() << std::dec
+              << (same ? "   (identical across all runs)" : "   *** DIFFERS BETWEEN RUNS ***") << "\n";
+    std::cout << std::setprecision(4)
+              << "cancel hit rate " << double(last.cancel_ok) / last.cancel_tot
+              << "   modify hit rate " << double(last.modify_ok) / last.modify_tot
+              << "   trades " << last.n_trades << "\n\n";
+
+    //  latency
+    run_latency(ops);                                       // warm-up, discarded
+    LatencySamples ls = run_latency(ops);
+    std::cout << "LATENCY (one pass, sampled; nanoseconds)\n";
+    print_latency_row("limit",  ls.limit);
+    print_latency_row("market", ls.market);
+    print_latency_row("cancel", ls.cancel);
+    print_latency_row("modify", ls.modify);
 
     return 0;
 }

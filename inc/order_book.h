@@ -86,10 +86,6 @@ public:
     bool add_market(OrderId id, OrderType type, Quantity qty, std::vector<Trade>& trades);
 
 
-    // returns the best bid and best ask
-    std::optional<Price> best_bid() const;
-    std::optional<Price> best_ask() const;
-
     /*
     Cancel a resting order by OrderID
     Returns: TRUE, if order was cancelled
@@ -110,13 +106,13 @@ public:
     */
    bool modify(OrderId id, Quantity new_qty);
 
+   // returns the best bid and best ask
+    std::optional<Price> best_bid() const;
+    std::optional<Price> best_ask() const;
+
     // qty at price p
     Quantity depth_at(OrderType side, Price p)  const;
 
-    // utilities for test
-    void display_book() const;
-    void display_map() const;
-    void display_level(const Level& lvl) const;
     bool check_invariants() const;
 
 private:
