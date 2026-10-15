@@ -39,20 +39,24 @@ template <typename BookSide, typename Crosses>
     }
 
     template <typename BookSide>
-    bool remove(BookSide& target, Locator& loc){
+    bool remove_resting(BookSide& target, const Locator& loc){
 
-        Level& lvl = target[loc.price];
+        (void)target;
+        Level* lvl = loc.lvl;
         Quantity q = loc.it->qty;
-        lvl.orders.erase(loc.it);
-        lvl.total_qty -= std::min(lvl.total_qty, q);
-        if(lvl.total_qty == 0)  target.erase(loc.price);
+
+        lvl->orders.erase(loc.it);
+        assert(lvl->total_qty >= q);
+        lvl->total_qty -= q;
+
+        if(lvl->orders.empty())  
+            target.erase(loc.price);
         return true;
 
     }
 
     template <typename BookSide>
     Quantity depth(const BookSide& book, Price price){
-
         auto it = book.find(price);
         return it == book.end() ? 0 : it->second.total_qty;
     }
@@ -91,7 +95,7 @@ template <typename BookSide, typename Crosses>
                 }
 
                 auto f_it = finder.find(it->id);
-                if(f_it == finder.end() || f_it->second.type != type || f_it->second.price != price || f_it->second.it != it){
+                if(f_it == finder.end() || f_it->second.type != type || f_it->second.price != price || f_it->second.it != it || f_it->second.lvl != &lvl){
                     std::cout<<"Finder map invalid - entry not present\n";
                     retval = retval & false;
                 }
@@ -125,15 +129,13 @@ bool OrderBook::add_order(OrderId id, OrderType type, Quantity qty, Price price,
         match(bids_, ord, [price](Price p){ return p >= price; }, trades, finder_);
 
 
-    if(ord.qty > 0){
-        
+    if(ord.qty > 0){    
         Level& lvl = (type == OrderType::BUY) ? bids_[price] : asks_[price]; 
         lvl.orders.push_back(ord);
         lvl.total_qty += ord.qty;
 
-        Locator loc{type, price, std::prev(lvl.orders.end())};
+        Locator loc{type, price, std::prev(lvl.orders.end()), &lvl};
         finder_[id] = loc;
-
     }
 
     return true;
@@ -159,7 +161,7 @@ bool OrderBook::cancel(OrderId id){
 
     if(finder_.find(id) == finder_.end())    return false;
     OrderType type = finder_[id].type;
-    bool cancelled = type == OrderType::BUY ? remove(bids_, finder_[id]) : remove(asks_, finder_[id]);
+    bool cancelled = type == OrderType::BUY ? remove_resting(bids_, finder_[id]) : remove_resting(asks_, finder_[id]);
     if(cancelled){
         finder_.erase(id);
         return true;
@@ -176,18 +178,18 @@ bool OrderBook::modify(OrderId id, Quantity new_qty){
 
     Locator& loc = it->second;
     if(loc.it->qty >= new_qty){
-        Level& lvl = (loc.type == OrderType::BUY) ? find_level(bids_, loc.price) : find_level(asks_, loc.price);
-        lvl.total_qty += (new_qty - loc.it->qty);
+        Level* lvl = loc.lvl;
+        lvl->total_qty += (new_qty - loc.it->qty);
         loc.it->qty = new_qty;
     }
     else{
-        Level& lvl = (loc.type == OrderType::BUY) ? bids_[loc.price] : asks_[loc.price];
+        Level* lvl = loc.lvl;
         Order new_ord{loc.it->id, loc.it->type, new_qty, loc.it->price};
 
-        lvl.total_qty += (new_qty - loc.it->qty);
+        lvl->total_qty += (new_qty - loc.it->qty);
 
-        lvl.orders.erase(loc.it);
-        lvl.orders.push_back(new_ord);
+        lvl->orders.erase(loc.it);
+        lvl->orders.push_back(new_ord);
 
         // List splicing can be used instead of deletion and then insertion
         // Uncomment and fix it when testing optimizations
@@ -195,7 +197,7 @@ bool OrderBook::modify(OrderId id, Quantity new_qty){
         // loc.it->qty = new_qty;                                      // same iterator, now last
         // lvl.total_qty += diff;
         
-        loc.it = std::prev(lvl.orders.end());
+        loc.it = std::prev(lvl->orders.end());
     }
 
     return true;
