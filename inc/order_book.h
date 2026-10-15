@@ -6,8 +6,9 @@
 #include <optional>
 #include <list>
 #include <vector>
-#include<unordered_map>
+#include <unordered_map>
 #include <ostream>
+#include "pool_alloc.h"
 
 using OrderId = uint64_t;
 using Quantity = int64_t;
@@ -44,10 +45,7 @@ struct Order {
     Price price;
 };
 
-struct Level {
-    std::list<Order> orders;
-    Quantity total_qty = 0;
-};
+using OrderList = std::list<Order, PoolAlloc<Order>>;
 
 struct Trade {
     Price price;
@@ -56,12 +54,22 @@ struct Trade {
     OrderId resting;
 };
 
+struct Level {
+    OrderList orders;
+    Quantity total_qty = 0;
+};
+
 struct Locator{
     OrderType type;
     Price price;
-    std::list<Order>::iterator it;
+    OrderList::iterator it;
     Level* lvl;     // pointer to the level
 };
+
+using Index = std::unordered_map<OrderId, Locator, 
+                                std::hash<OrderId>, 
+                                std::equal_to<OrderId>, 
+                                PoolAlloc<std::pair<const OrderId, Locator>>>;
 
 class OrderBook {
 
@@ -126,6 +134,6 @@ private:
     std::map<Price, Level> asks_;
 
     // OrderID mapper for O(1) lookup for cancel
-    std::unordered_map<OrderId, Locator> finder_;
+    Index finder_;
 
 };

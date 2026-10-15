@@ -8,7 +8,7 @@ namespace {
 
 template <typename BookSide, typename Crosses>
     void match(BookSide& target, Order& incoming, Crosses crossfn, 
-        std::vector<Trade>& trades, std::unordered_map<OrderId, Locator>& finder){
+        std::vector<Trade>& trades, Index& finder){
 
         while(incoming.qty > 0 && !target.empty()){
 
@@ -70,7 +70,7 @@ template <typename BookSide, typename Crosses>
 
     template <typename BookSide>
     bool check_invariant_per_side(BookSide& book, OrderType type, 
-        const std::unordered_map<OrderId, Locator>& finder, uint64_t& tot_ids){
+        const Index& finder, uint64_t& tot_ids){
 
         bool retval = true;
 

@@ -8,7 +8,7 @@ mutation testing) and on honest, reproducible performance measurement.
 increase goes to the back of the queue). Every call that matches returns the list of trades.
 
 ## Contents
-1. [Matching rules](#matching-rules)
+1. [Matching rules](#basic-matching-rules-and-assumptions)
 2. [Design and complexity](#design-and-complexity)
 3. [Build and run](#build-and-run)
 4. [How it was tested](#how-it-was-tested)
@@ -22,12 +22,12 @@ increase goes to the back of the queue). Every call that matches returns the lis
 - A trade executes at the **resting** order's price. The incoming order receives any price improvement.
 - A limit order matches while it crosses the opposite side. Any remainder rests at its own limit price.
 - A market order matches at any price. An unfilled remainder is **discarded**. The order never rests.
-- `modify(id, new_qty)`: `new_qty` is the order's new **remaining** quantity, which will replace the resting quantity
-  of the order. It does not track or figure with the total quantity with which the order was first added.
+- `modify(id, new_qty)`: `new_qty` is the order's new **remaining** quantity, which replaces the resting quantity
+  of the order. It is independent of the quantity the order was first added with.
   `new_qty <= 0` is rejected. Equal or smaller keeps priority. Larger moves the order to the back of its queue.
 - An order ID must not belong to a currently resting order. A cancelled or fully filled ID can be reused.
-- `qty <= 0` is rejected. 
-- Market orders on an empty opposite book will be a no-op. The operation still counts as a success however.
+- `qty <= 0` is rejected.
+- A market order against an empty opposite side is a no-op. The operation still counts as a success.
 - The book is never crossed: after every operation, best bid < best ask.
 
 ## Design and complexity
@@ -36,11 +36,13 @@ increase goes to the back of the queue). Every call that matches returns the lis
 |---|---|
 | Bids | `std::map<Price, Level, std::greater<Price>>`|
 | Asks | `std::map<Price, Level>`|
-| `Level` | `std::list<Order>` as a FIFO queue, plus a cached `total_qty` |
-| Order index | `std::unordered_map<OrderId, Locator>`; a `Locator` holds side, price, the list iterator and a pointer to the level (Optimization 2)|
+| `Level` | `OrderList` (a `std::list<Order>`) as a FIFO queue, plus a cached `total_qty` |
+| Order index | `std::unordered_map<OrderId, Locator>`; a `Locator` holds side, price, the list iterator and a pointer to the level (step 2) |
+| Allocation | `OrderList` nodes and the index nodes come from a free-list pool allocator, `PoolAlloc` (step 3). The `bids_` / `asks_` map nodes use the default allocator. |
 
 `std::list` is used because erasing one element never invalidates the other iterators,
 so the iterators stored in the index stay valid for the life of each order.
+The level pointer in the locator stays valid because `std::map` nodes never move.
 
 | Operation | Cost |
 |---|---|
@@ -72,16 +74,24 @@ so the iterators stored in the index stay valid for the life of each order.
 | Differential fuzzer | The same random operation stream goes to both engines. After every step the return values, trades, best bid/ask and depth at every price are compared, and `check_invariants()` runs on the real engine. [1,000 seeds x 5,000 steps at two price widths, plus longer single runs of up to 700,000 steps] |
 | Coverage counters | The fuzzer reports: longest queue at one price, max live orders, trades and partial fills, modifies split into reduce / equal / increase / invalid / dead ID, cancels and modifies that hit a partially filled order, empty-book events |
 | Mutation tests | The checker was tested by injecting [10] deliberate bugs into the engine, and the fuzzer by injecting [5], each of which must be detected. Detected: [10/10, 5/5]. This includes a priority bug that no invariant can see and only the differential comparison catches. |
-| Checked containers | Unit tests and the fuzzer were run with `-D_GLIBCXX_DEBUG -D_GLIBCXX_ASSERTIONS`. [State the result of the stale-iterator sensitivity check.] |
+| Checked containers | Unit tests and the fuzzer were run with `-D_GLIBCXX_DEBUG -D_GLIBCXX_ASSERTIONS`. |
+
+The unit tests and the fuzzer were re-run on the final build (with the level pointer and the pooled allocator) before the
+benchmark numbers below were recorded.
 
 **Notes on the process**
 
 - A stale list iterator can stay "valid" by accident when the allocator hands back the same memory,
   so an invariant that only compares iterators can miss it. It was found while testing the checker.
+  The pooled allocator reuses freed slots last-in, first-out, which makes this case more likely, so the invariants
+  also check the level pointer and the quantities, not only the iterators.
 - The priority bug mentioned is the modify increase case where the order quantity grows in place. Since no other invariant changes here, only a comparison to a reference engine can catch this.
 - The fuzzer's own generator had a bug (arguments to `uniform_int_distribution` swapped by mistake, which is undefined behaviour),
   which produced prices across the whole 64-bit range and quietly removed all queueing. The coverage counters exposed it.
 
+**Limits of this evidence.** Both engines were written by the same author, so a shared misreading of an exchange rule
+would not be detected by the comparison; the hand-derived unit tests are the guard against that.
+Full AddressSanitizer / UBSan runs were not available in this environment (WSL could not be enabled).
 
 ## Benchmark
 
@@ -95,7 +105,8 @@ so the iterators stored in the index stay valid for the life of each order.
 | OS | Windows 11 25H2, build 26200.9550 |
 | Compiler | g++ (MinGW-W64 x86_64-msvcrt-posix-seh, built by Brecht Sanders, r1) 14.0.1 20240324 (experimental) |
 | Flags | `-std=c++17 -O2 -DNDEBUG -Wall -Wextra` |
-| Power / load | plugged in, Balanced mode |
+| Power / load | plugged in, Balanced mode, not pinned to a core |
+| Date and commit | [date, `git rev-parse --short HEAD`] |
 | Clock | `std::chrono::steady_clock`, smallest tick 100 ns, `now()` costs about 25 ns |
 
 ### Workload
@@ -115,23 +126,28 @@ One untimed warm-up run, then 20 timed runs of the full workload on a fresh book
 | Step | Seed | Median (M ops/s) | Median (ns/op) | Min | Max | Spread | Checksum |
 |---|---|---|---|---|---|---|---|
 | Baseline | 4 | 13.22 | 75.63 | 11.92 | 13.70 | 13.5% | `0x5350e91cf56a6367` |
-| Baseline | 5 | 13.67 | 73.14 | 12.78 | 13.96 | 8.6% | `0x329ecc77e01ae5e0` |
+| Final (steps 1 to 3) | 4 | 28.73 | 34.80 | 27.10 | 29.66 | 8.9% | `0x5350e91cf56a6367` |
 
 The checksum is an order-dependent hash of every trade plus the final book state.
 It must be identical after every optimisation; a change means behaviour changed.
-Run-to-run spread is about 10%, so only differences clearly larger than that are treated as real.
+Run-to-run spread is about 10% for a single configuration, and occasionally much more (one run in a set dropped by 30%),
+so single runs are not compared. The optimisation steps below were measured with interleaved or back-to-back pairs.
+
+The baseline and final rows were measured in different sessions, so the overall factor is approximate:
+13.22 to 28.73 M ops/s is about 2.2x, which agrees with the product of the per-step ratios measured below
+(1.12 x 1.16 x 1.7).
 
 ### Optimisations
 
 Each row is one change on top of the previous one. The unit tests, invariants and fuzzer pass before benchmarking.
 
-| Step | What changed | Median (M ops/s) | vs. baseline | Checksums match |
+| Step | What changed | Median (M ops/s) | vs. previous step | Checksums match |
 |---|---|---|---|---|
-| 1 | `finder_.reserve(1<<20)` | 12.26 -> 14.45 | 1.12x (range 1.10x to 1.20x over 6 interleaved pairs) | yes |
-| 2 | Pointer to `level` in the locator map | 14.60 → 16.91 | 1.16x | yes |
-| 3 | [Flat array by price tick] | [ ] | [ ] | [ ] |
+| 1 | `finder_.reserve(1<<20)` | 12.86 → 14.45 | 1.12x (range 1.10x to 1.20x over 6 interleaved pairs) | yes |
+| 2 | Pointer to `level` in the locator map | 14.60 → 16.91 (seed 4) | 1.16x | yes |
+| 3 | Pooled node allocation (`OrderList`, `finder_`) | 17.10 → 29.08 (seed 3) | 1.7x (3 interleaved pairs: 1.69x to 1.72x) | yes |
 
-#### __Reserve__: reserve space upfront for the finder map (8 MB). 
+#### __Reserve__: reserve space upfront for the finder map (8 MB).
 Measured by alternating the two configurations (no reserve vs. 1M buckets) in a single binary, six interleaved
 pairs; every pair favoured the reserve (ratio 1.10x to 1.20x, median-of-medians 12.86 to 14.45 M ops/s, about 1.12x).
 The result is the same when book construction, including the 8 MB bucket-array allocation, is moved inside the
@@ -154,37 +170,63 @@ Sampled mean latency fell by about 24 ns for both cancel and modify (seed 1: 91 
 market, whose code did not change, moved by 6-9 ns, which is within the noise of a single sampled pass.
 Latency means include about 25 ns of clock overhead.
 
+#### __Pooled allocation__: replace per-node heap allocation with a free-list pool for the order queues and the finder map.
+Every resting order costs two heap allocations (a `std::list` node and an `unordered_map` node) and every cancel frees
+two. All nodes of one type are the same size, so `PoolAlloc<T>` (`inc/pool_alloc.h`) keeps a free list of equal-size
+slots carved from 4096-slot chunks: allocate pops a slot, deallocate pushes it back, with no lock and no header.
+It is stateless (one static pool per node type) and is used for `OrderList = std::list<Order, PoolAlloc<Order>>` and
+the `finder_` index. Requests for more than one object, such as the hash bucket array, still go to `::operator new`.
+The `bids_` / `asks_` map nodes are not pooled, because a price level is created far less often than an order.
+Measured by alternating the base and pooled binaries three times each on seed 3 (20 runs per binary): median
+throughput 16.56 to 28.06, 17.23 to 29.60 and 17.10 to 29.08 M ops/s, ratios 1.69x, 1.72x and 1.70x.
+Non-interleaved runs agree: 15.05 to 28.41 M ops/s (1.89x) on seed 1 and 17.08 to 28.73 M ops/s (1.68x) on seed 4.
+Checksums are identical on every run of every seed. Sampled mean latency on seed 3 (raw means, including about
+25 ns of clock overhead) fell for limit from about 97 to 59 ns, for cancel from 66 to 52 ns, for modify from 54 to 44 ns
+and for market from 77 to 61 ns. The limit add gains most because it makes two allocations, and cancels gain because
+they free two nodes. The size of the gain is specific to this platform: MinGW's `new` goes to the Windows process
+heap, which is a likely reason for the high per-call cost (not profiled), so the gain with glibc `malloc` on Linux
+is expected to be smaller (not measured). The pool never returns memory to the OS and is not thread-safe, and later
+runs in the same process reuse chunks warmed by earlier ones (the untimed warm-up run absorbs the first-touch cost).
 
-## What did not work
-Compiler flags: Adding `-O3` and `-flto` flags have no measurable effect.
+### What did not work
 
-
+- Compiler flags: adding `-O3` and `-flto` had no measurable effect on median throughput.
+- Pinning the benchmark to a single core gave lower throughput (11.77 M ops/s) than unpinned runs, so all benchmarks
+  run unpinned in Balanced power mode.
 
 ### Latency
 
 A separate pass on a fresh book, timing a sample of about 50,000 operations of each kind.
 Because the clock ticks every 100 ns and one `now()` call costs about 25 ns, **p50 and p90 are not resolvable**
-(read p50 = 100 as "about one tick or less"). The p99 and p99.9 columns are the informative ones.
+(read p50 = 100 as "about one tick or less", and p50 = 0 as "below one tick"). The p99 and p99.9 columns are the
+informative ones. Final build, seed 4:
 
 | Operation | p50 | p90 | p99 | p99.9 | Mean (raw) |
 |---|---|---|---|---|---|
-| Limit | 100 | 200 | 300 | 600 | 118 |
-| Market | 100 | 200 | 300 | 600 | 95 |
-| Cancel | 100 | 100 | 200 | 400 | 85 |
-| Modify | 100 | 100 | 200 | 400 | 77 |
+| Limit | 100 | 100 | 200 | 400 | 59 |
+| Market | 100 | 100 | 200 | 400 | 60 |
+| Cancel | 0 | 100 | 200 | 300 | 52 |
+| Modify | 0 | 100 | 200 | 300 | 44 |
 
-All values in nanoseconds (seed 4). The raw mean includes about 25 ns of clock overhead.
+All values in nanoseconds. The raw mean includes about 25 ns of clock overhead. For comparison, the original baseline
+raw means on the same seed were 118 (limit), 95 (market), 85 (cancel) and 77 (modify) ns.
 
 ### Where the time goes
 
-Sampled mean per operation (clock overhead subtracted) times the number of operations, approximate:
-limit adds about 60% of runtime, cancels about 30%, modifies about 5%, market orders about 5%.
-Limit adds are clearly dominant, even with `O(log L)` complexity, which points at memory
-behaviour (heap allocation and cache misses) and not instruction count.
+Sampled mean per operation (clock overhead subtracted) times the number of operations, final build, approximate:
+limit adds about 50% of runtime, cancels about 35%, modifies about 7%, market orders about 6%.
+Before pooling, limit adds were about 60%. They are still the largest share, but the gap to cancels has narrowed,
+which fits the allocation cost being removed from both. The remaining cost is likely cache misses on the hash index
+and the level maps (the book is large in this workload); this was not profiled.
 
 ## Limitations and future work
 
 - Single thread, single instrument; no IOC / FOK / stop orders and no auction phases.
-- Benchmarked on Windows with MinGW GCC only; numbers are not directly comparable to Linux results.
+- Benchmarked on Windows with MinGW GCC only; numbers are not directly comparable to Linux results, and the pooling gain
+  in particular depends on how slow the platform's `malloc` is.
+- The pool allocator is not thread-safe and never returns memory to the OS.
 - Latency percentiles are limited by the 100 ns clock.
+- Not done: pooling the `bids_` / `asks_` map nodes, and a flat array of levels indexed by price tick, which would
+  replace the O(log L) level lookup on limit adds. The flat array would need the cached level pointers redesigned,
+  because they rely on `std::map` nodes not moving.
 - Not implemented: market simulator, market-making strategy and markout analysis.
