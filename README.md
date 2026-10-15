@@ -106,7 +106,7 @@ Full AddressSanitizer / UBSan runs were not available in this environment (WSL c
 | Compiler | g++ (MinGW-W64 x86_64-msvcrt-posix-seh, built by Brecht Sanders, r1) 14.0.1 20240324 (experimental) |
 | Flags | `-std=c++17 -O2 -DNDEBUG -Wall -Wextra` |
 | Power / load | plugged in, Balanced mode, not pinned to a core |
-| Date and commit | [date, `git rev-parse --short HEAD`] |
+| Date and commit | 5662b39; 15th Oct 2026 |
 | Clock | `std::chrono::steady_clock`, smallest tick 100 ns, `now()` costs about 25 ns |
 
 ### Workload
