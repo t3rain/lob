@@ -37,7 +37,7 @@ increase goes to the back of the queue). Every call that matches returns the lis
 | Bids | `std::map<Price, Level, std::greater<Price>>`|
 | Asks | `std::map<Price, Level>`|
 | `Level` | `std::list<Order>` as a FIFO queue, plus a cached `total_qty` |
-| Order index | `std::unordered_map<OrderId, Locator>`; a `Locator` holds side, price and the list iterator |
+| Order index | `std::unordered_map<OrderId, Locator>`; a `Locator` holds side, price, the list iterator and a pointer to the level (Optimization 2)|
 
 `std::list` is used because erasing one element never invalidates the other iterators,
 so the iterators stored in the index stay valid for the life of each order.
@@ -46,7 +46,7 @@ so the iterators stored in the index stay valid for the life of each order.
 |---|---|
 | Rest a new limit order | O(log L) to find or create the level (L = number of price levels), O(1) average for the index insert |
 | Cancel | O(1) average to locate and erase, plus O(log L) if the level becomes empty |
-| Modify (reduce or equal) | O(1) average plus the level lookup |
+| Modify (reduce or equal) | O(1) |
 | Modify (increase) | cancel plus re-insert at the back of the queue |
 | Match | O(k) for k fills, plus O(log L) for each level exhausted |
 | Best bid / best ask | O(1) |
@@ -67,7 +67,7 @@ so the iterators stored in the index stay valid for the life of each order.
 | Layer | What it checks |
 |---|---|
 | Unit tests | [N] hand-derived cases: FIFO, multi-level sweeps, price improvement, partial fills, cancel at front, middle and back of a queue, modify priority, ID reuse, rejected inputs |
-| `check_invariants()` | Not crossed; no empty levels; each level's `total_qty` equals the sum of its orders; no non-positive quantities; every resting order is in the index with matching side, price and iterator; index size equals the number of resting orders. Called after every operation in the test suites. |
+| `check_invariants()` | Not crossed; no empty levels; each level's `total_qty` equals the sum of its orders; no non-positive quantities; every resting order is in the index with matching side, price, iterator and level pointer; index size equals the number of resting orders. Called after every operation in the test suites. |
 | Reference engine | A deliberately naive book (two unsorted vectors, a sequence number per order, linear scans) that shares no matching logic with the real engine. |
 | Differential fuzzer | The same random operation stream goes to both engines. After every step the return values, trades, best bid/ask and depth at every price are compared, and `check_invariants()` runs on the real engine. [1,000 seeds x 5,000 steps at two price widths, plus longer single runs of up to 700,000 steps] |
 | Coverage counters | The fuzzer reports: longest queue at one price, max live orders, trades and partial fills, modifies split into reduce / equal / increase / invalid / dead ID, cancels and modifies that hit a partially filled order, empty-book events |
